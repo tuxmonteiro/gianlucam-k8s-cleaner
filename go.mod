@@ -9,7 +9,7 @@ require (
 	github.com/go-logr/logr v1.4.1
 	github.com/go-logr/zapr v1.3.0
 	github.com/jbogarin/go-cisco-webex-teams v0.4.3
-	github.com/onsi/ginkgo/v2 v2.17.0
+	github.com/onsi/ginkgo/v2 v2.17.1
 	github.com/onsi/gomega v1.32.0
 	github.com/pkg/errors v0.9.1
 	github.com/projectsveltos/libsveltos v0.26.0
