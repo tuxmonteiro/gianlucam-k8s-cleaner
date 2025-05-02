@@ -10,21 +10,14 @@ rules:
   - '*'
   verbs:
   - '*'
-  - delete
-  - get
-  - list
-  - watch
 - apiGroups:
   - apps.projectsveltos.io
   resources:
   - cleaners
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch
-  - update
   - watch
 - apiGroups:
   - apps.projectsveltos.io
@@ -41,8 +34,14 @@ rules:
   - patch
   - update
 - apiGroups:
-  - apps.projectsveltos.io
+  - authentication.k8s.io
   resources:
-  - reports
+  - tokenreviews
   verbs:
-  - '*'
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create

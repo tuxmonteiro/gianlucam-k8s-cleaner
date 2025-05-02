@@ -37,24 +37,35 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	appsv1alpha1 "gianlucam76/k8s-cleaner/api/v1alpha1"
 	"gianlucam76/k8s-cleaner/internal/controller"
+	"gianlucam76/k8s-cleaner/internal/telemetry"
 	//+kubebuilder:scaffold:imports
 )
 
 var (
-	setupLog        = ctrl.Log.WithName("setup")
-	metricsAddr     string
-	probeAddr       string
-	workers         int
-	restConfigQPS   float32
-	restConfigBurst int
-	webhookPort     int
-	syncPeriod      time.Duration
+	setupLog              = ctrl.Log.WithName("setup")
+	diagnosticsAddress    string
+	insecureDiagnostics   bool
+	workers               int
+	restConfigQPS         float32
+	restConfigBurst       int
+	webhookPort           int
+	concurrentReconciles  int
+	syncPeriod            time.Duration
+	jitterWindowInSeconds int
+	healthAddr            string
+	disableTelemetry      bool
+	version               string
 )
+
+// Add RBAC for the authorized diagnostics endpoint.
+//+kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
+//+kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 
 func main() {
 	scheme, err := initScheme()
@@ -81,10 +92,8 @@ func main() {
 
 	ctrlOptions := ctrl.Options{
 		Scheme:                 scheme,
-		HealthProbeBindAddress: probeAddr,
-		Metrics: metricsserver.Options{
-			BindAddress: metricsAddr,
-		},
+		Metrics:                getDiagnosticsOptions(),
+		HealthProbeBindAddress: healthAddr,
 		WebhookServer: webhook.NewServer(
 			webhook.Options{
 				Port: webhookPort,
@@ -104,8 +113,10 @@ func main() {
 	}
 
 	if err = (&controller.CleanerReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:                mgr.GetClient(),
+		Scheme:                mgr.GetScheme(),
+		ConcurrentReconciles:  concurrentReconciles,
+		JitterWindowInSeconds: jitterWindowInSeconds,
 	}).SetupWithManager(ctx, mgr, workers, ctrl.Log.WithName("worker")); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Cleaner")
 		os.Exit(1)
@@ -121,6 +132,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	if !disableTelemetry {
+		err = telemetry.StartCollecting(ctx, mgr.GetClient(), version)
+		if err != nil {
+			setupLog.Error(err, "failed starting telemetry client")
+		}
+	}
+
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
@@ -129,15 +147,30 @@ func main() {
 }
 
 func initFlags(fs *pflag.FlagSet) {
-	fs.StringVar(&metricsAddr, "metrics-bind-address", ":8080",
-		"The address the metric endpoint binds to.")
+	fs.StringVar(&version, "version", "", "current k8s-cleaner version")
 
-	fs.StringVar(&probeAddr, "health-probe-bind-address", ":8081",
-		"The address the probe endpoint binds to.")
+	fs.BoolVar(&disableTelemetry, "disable-telemetry", false,
+		"When set, disable telemetry reporting")
+
+	fs.StringVar(&diagnosticsAddress, "diagnostics-address", ":8443",
+		"The address the diagnostics endpoint binds to. Per default metrics are served via https and with"+
+			"authentication/authorization. To serve via http and without authentication/authorization set --insecure-diagnostics."+
+			"If --insecure-diagnostics is not set the diagnostics endpoint also serves pprof endpoints and an endpoint to change the log level.")
+
+	fs.BoolVar(&insecureDiagnostics, "insecure-diagnostics", false,
+		"Enable insecure diagnostics serving. For more details see the description of --diagnostics-address.")
 
 	const defaultWorkers = 5
 	fs.IntVar(&workers, "worker-number", defaultWorkers,
-		"Number of worker. Workers are used to process cleaner instances in backgroun")
+		"Number of worker. Workers are used to process cleaner instances in background")
+
+	const defaultJitterWindow = 15
+	fs.IntVar(&jitterWindowInSeconds, "jitter-window", defaultJitterWindow,
+		"The predefined time interval around a scheduled execution time.")
+
+	const defaultReconcilers = 10
+	fs.IntVar(&concurrentReconciles, "concurrent-reconciles", defaultReconcilers,
+		"concurrent reconciles is the maximum number of concurrent Reconciles which can be run. Defaults to 10")
 
 	const defautlRestConfigQPS = 40
 	fs.Float32Var(&restConfigQPS, "kube-api-qps", defautlRestConfigQPS,
@@ -157,9 +190,11 @@ func initFlags(fs *pflag.FlagSet) {
 	fs.DurationVar(&syncPeriod, "sync-period", defaultSyncPeriod*time.Minute,
 		fmt.Sprintf("The minimum interval at which watched resources are reconciled (e.g. 15m). Default: %d minutes",
 			defaultSyncPeriod))
+
+	fs.StringVar(&healthAddr, "health-addr", ":9440",
+		"The address the health endpoint binds to.")
 }
 
-//+kubebuilder:rbac:groups=apps.projectsveltos.io,resources=reports,verbs=*
 //+kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch;delete
 
 func initScheme() (*runtime.Scheme, error) {
@@ -189,4 +224,25 @@ func createLogger() *zap.Config {
 	}
 
 	return &loggerCfg
+}
+
+// getDiagnosticsOptions returns metrics options which can be used to configure a Manager.
+func getDiagnosticsOptions() metricsserver.Options {
+	// If "--insecure-diagnostics" is set, serve metrics via http
+	// and without authentication/authorization.
+	if insecureDiagnostics {
+		return metricsserver.Options{
+			BindAddress:   diagnosticsAddress,
+			SecureServing: false,
+		}
+	}
+
+	// If "--insecure-diagnostics" is not set, serve metrics via https
+	// and with authentication/authorization. As the endpoint is protected,
+	// we also serve pprof endpoints and an endpoint to change the log level.
+	return metricsserver.Options{
+		BindAddress:    diagnosticsAddress,
+		SecureServing:  true,
+		FilterProvider: filters.WithAuthenticationAndAuthorization,
+	}
 }

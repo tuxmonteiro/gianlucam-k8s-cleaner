@@ -41,7 +41,7 @@ import (
 
 	appsv1alpha1 "gianlucam76/k8s-cleaner/api/v1alpha1"
 
-	libsveltosv1alpha1 "github.com/projectsveltos/libsveltos/api/v1alpha1"
+	libsveltosv1beta1 "github.com/projectsveltos/libsveltos/api/v1beta1"
 	logs "github.com/projectsveltos/libsveltos/lib/logsettings"
 )
 
@@ -185,7 +185,7 @@ func processCleanerInstance(ctx context.Context, cleanerName string, logger logr
 	var processedResources []ResourceResult
 	switch cleaner.Spec.Action {
 	case appsv1alpha1.ActionDelete:
-		processedResources, err = deleteMatchingResources(ctx, resources, logger)
+		processedResources, err = deleteMatchingResources(ctx, resources, cleaner.Spec.DeleteOptions, logger)
 	case appsv1alpha1.ActionTransform:
 		processedResources, err = updateMatchingResources(ctx, resources, cleaner.Spec.Transform, logger)
 	case appsv1alpha1.ActionScan:
@@ -224,7 +224,7 @@ func getMatchingResources(ctx context.Context, sr *appsv1alpha1.ResourceSelector
 	results := make([]ResourceResult, 0)
 	for i := range resources {
 		resource := &resources[i]
-		if !resource.GetDeletionTimestamp().IsZero() {
+		if sr.ExcludeDeleted && !resource.GetDeletionTimestamp().IsZero() {
 			continue
 		}
 		l := logger.WithValues("resource", fmt.Sprintf("%s:%s/%s",
@@ -249,7 +249,7 @@ func getMatchingResources(ctx context.Context, sr *appsv1alpha1.ResourceSelector
 }
 
 func deleteMatchingResources(ctx context.Context, resources []ResourceResult,
-	logger logr.Logger) ([]ResourceResult, error) {
+	deleteOptions *appsv1alpha1.DeleteOptions, logger logr.Logger) ([]ResourceResult, error) {
 
 	processedResources := make([]ResourceResult, 0)
 
@@ -260,7 +260,14 @@ func deleteMatchingResources(ctx context.Context, resources []ResourceResult,
 			resource.Resource.GetNamespace(),
 			resource.Resource.GetName()))
 		l.Info("deleting resource")
-		if err := k8sClient.Delete(ctx, resource.Resource); err != nil {
+
+		options := &client.DeleteOptions{}
+		if deleteOptions != nil {
+			options.GracePeriodSeconds = deleteOptions.GracePeriodSeconds
+			options.PropagationPolicy = deleteOptions.PropagationPolicy
+		}
+
+		if err := k8sClient.Delete(ctx, resource.Resource, options); err != nil {
 			l.Info(fmt.Sprintf("failed to delete resource: %v", err))
 			return processedResources, err
 		}
@@ -336,7 +343,7 @@ func fetchResources(ctx context.Context, resourceSelector *appsv1alpha1.Resource
 				labelFilter += ","
 			}
 			f := resourceSelector.LabelFilters[i]
-			if f.Operation == libsveltosv1alpha1.OperationEqual {
+			if f.Operation == libsveltosv1beta1.OperationEqual {
 				labelFilter += fmt.Sprintf("%s=%s", f.Key, f.Value)
 			} else {
 				labelFilter += fmt.Sprintf("%s!=%s", f.Key, f.Value)
@@ -422,7 +429,6 @@ func getNamespaces(ctx context.Context, resourceSelector *appsv1alpha1.ResourceS
 		for i := range namespaces.Items {
 			ns := &namespaces.Items[i]
 
-			logger.V(logs.LogInfo).Info(fmt.Sprintf("MGIANLUC namespace %s", ns.Name))
 			if !ns.DeletionTimestamp.IsZero() {
 				// Only existing namespaces can match
 				continue

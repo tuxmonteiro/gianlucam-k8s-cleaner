@@ -15,6 +15,42 @@
       "contributions": [
         "code"
       ]
+    },
+    {
+      "login": "oliverbaehler",
+      "name": "Oliver Bähler",
+      "avatar_url": "https://avatars.githubusercontent.com/u/26610571?v=4",
+      "profile": "https://keybase.io/oliverbaehler",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "egrosdou01",
+      "name": "Eleni Grosdouli",
+      "avatar_url": "https://avatars.githubusercontent.com/u/147995681?v=4",
+      "profile": "https://github.com/egrosdou01",
+      "contributions": [
+        "doc"
+      ]
+    },
+    {
+      "login": "colinjlacy",
+      "name": "Colin J Lacy",
+      "avatar_url": "https://avatars.githubusercontent.com/u/4993605?v=4",
+      "profile": "https://github.com/colinjlacy",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "aminmr",
+      "name": "Amin Mohammadian",
+      "avatar_url": "https://avatars.githubusercontent.com/u/61911987?v=4",
+      "profile": "https://github.com/aminmr",
+      "contributions": [
+        "doc"
+      ]
     }
   ],
   "contributorsPerLine": 7,

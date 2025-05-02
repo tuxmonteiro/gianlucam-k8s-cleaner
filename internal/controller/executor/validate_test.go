@@ -35,7 +35,7 @@ import (
 	appsv1alpha1 "gianlucam76/k8s-cleaner/api/v1alpha1"
 	"gianlucam76/k8s-cleaner/internal/controller/executor"
 
-	libsveltosutils "github.com/projectsveltos/libsveltos/lib/utils"
+	"github.com/projectsveltos/libsveltos/lib/k8s_utils"
 )
 
 const (
@@ -207,7 +207,6 @@ func verifyCleanerTransform(dirName string) {
 	By(fmt.Sprintf("Validating cleaner in dir: %s", dirName))
 	cleaner := getCleaner(dirName)
 	Expect(cleaner).ToNot(BeNil())
-
 	matchingResource := getResource(dirName, matchingFileName)
 	if matchingResource == nil {
 		By(fmt.Sprintf("%s file not present", matchingFileName))
@@ -281,15 +280,25 @@ func verifyCleanerAggregatedSelection(dirName string) {
 	cleaner := getCleaner(dirName)
 	Expect(cleaner).ToNot(BeNil())
 
+	var result []executor.ResourceResult
 	resources := getResources(dirName, allResourceFileName)
 	matchingResources := getResources(dirName, matchingFileName)
 	if resources == nil {
 		By(fmt.Sprintf("%s file not present", matchingFileName))
 	} else {
-		result, err := executor.AggregatedSelection(cleaner.Spec.ResourcePolicySet.AggregatedSelection,
+		result, err = executor.AggregatedSelection(cleaner.Spec.ResourcePolicySet.AggregatedSelection,
 			resources, logger)
 		Expect(err).To(BeNil())
 		verifyMatchingResources(result, matchingResources)
+	}
+
+	Expect(len(matchingResources) < len(resources))
+	for i := range resources {
+		if !isPresent(resources[i], matchingResources) {
+			// resource is supposed to be non matching. Verify it is not present
+			// in the cleaner result
+			Expect(isPresent(resources[i], result)).To(BeFalse())
+		}
 	}
 }
 
@@ -298,7 +307,7 @@ func getCleaner(dirName string) *appsv1alpha1.Cleaner {
 	content, err := os.ReadFile(cleanerFileName)
 	Expect(err).To(BeNil())
 
-	u, err := libsveltosutils.GetUnstructured(content)
+	u, err := k8s_utils.GetUnstructured(content)
 	Expect(err).To(BeNil())
 
 	var cleaner appsv1alpha1.Cleaner
@@ -320,7 +329,7 @@ func getResource(dirName, fileName string) *unstructured.Unstructured {
 	content, err := os.ReadFile(resourceFileName)
 	Expect(err).To(BeNil())
 
-	u, err := libsveltosutils.GetUnstructured(content)
+	u, err := k8s_utils.GetUnstructured(content)
 	Expect(err).To(BeNil())
 
 	return u
@@ -341,7 +350,7 @@ func getResources(dirName, fileName string) []executor.ResourceResult {
 	resources := make([]executor.ResourceResult, 0)
 	elements := strings.Split(string(content), "---")
 	for i := range elements {
-		u, err := libsveltosutils.GetUnstructured([]byte(elements[i]))
+		u, err := k8s_utils.GetUnstructured([]byte(elements[i]))
 		Expect(err).To(BeNil())
 		resources = append(resources, executor.ResourceResult{
 			Resource: u,
@@ -372,4 +381,14 @@ func verifyMatchingResources(result, matchingResources []executor.ResourceResult
 			Expect(key).To(BeEmpty())
 		}
 	}
+}
+
+func isPresent(r executor.ResourceResult, resources []executor.ResourceResult) bool {
+	for i := range resources {
+		if r.Resource == resources[i].Resource {
+			return true
+		}
+	}
+
+	return false
 }

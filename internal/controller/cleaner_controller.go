@@ -1,5 +1,5 @@
 /*
-Copyright 2023.
+Copyright 2023. projectsveltos.io. All rights reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -29,7 +29,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	appsv1alpha1 "gianlucam76/k8s-cleaner/api/v1alpha1"
@@ -42,10 +44,12 @@ import (
 // CleanerReconciler reconciles a Cleaner object
 type CleanerReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme                *runtime.Scheme
+	ConcurrentReconciles  int
+	JitterWindowInSeconds int
 }
 
-//+kubebuilder:rbac:groups=apps.projectsveltos.io,resources=cleaners,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=apps.projectsveltos.io,resources=cleaners,verbs=get;list;watch;patch
 //+kubebuilder:rbac:groups=apps.projectsveltos.io,resources=cleaners/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=apps.projectsveltos.io,resources=cleaners/finalizers,verbs=update
 //+kubebuilder:rbac:groups="*",resources="*",verbs="*"
@@ -125,7 +129,12 @@ func (r *CleanerReconciler) reconcileDelete(ctx context.Context,
 func (r *CleanerReconciler) reconcileNormal(ctx context.Context, cleanerScope *scope.CleanerScope,
 	logger logr.Logger) (reconcile.Result, error) {
 
-	logger.Info("reconcileSnapshotNormal")
+	logger.Info("reconcile Cleaner instance")
+
+	// old finalizer (cleanerfinalizer.projectsveltos.io) caused an warning message.
+	// Since we switched to new one, remove old one if ever set.
+	r.removeOldFinalizer(cleanerScope)
+
 	if err := r.addFinalizer(ctx, cleanerScope.Cleaner, appsv1alpha1.CleanerFinalizer); err != nil {
 		logger.Info(fmt.Sprintf("failed to add finalizer: %s", err))
 		return reconcile.Result{}, err
@@ -143,7 +152,7 @@ func (r *CleanerReconciler) reconcileNormal(ctx context.Context, cleanerScope *s
 	}
 
 	now := time.Now()
-	nextRun, err := schedule(ctx, cleanerScope, logger)
+	nextRun, err := schedule(ctx, cleanerScope, r.JitterWindowInSeconds, logger)
 	if err != nil {
 		logger.Info("failed to get next run. Err: %v", err)
 		msg := err.Error()
@@ -151,7 +160,7 @@ func (r *CleanerReconciler) reconcileNormal(ctx context.Context, cleanerScope *s
 		return ctrl.Result{}, err
 	}
 
-	logger.Info("reconcile snapshot succeeded")
+	logger.Info("reconcile Cleaner succeeded")
 	scheduledResult := ctrl.Result{RequeueAfter: nextRun.Sub(now)}
 	return scheduledResult, nil
 }
@@ -164,6 +173,10 @@ func (r *CleanerReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manag
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&appsv1alpha1.Cleaner{}).
+		WithEventFilter(predicate.GenerationChangedPredicate{}).
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: r.ConcurrentReconciles,
+		}).
 		Complete(r)
 }
 
@@ -204,7 +217,9 @@ func (r *CleanerReconciler) removeReport(ctx context.Context,
 	return fmt.Errorf("report instance still present")
 }
 
-func schedule(ctx context.Context, cleanerScope *scope.CleanerScope, logger logr.Logger) (*time.Time, error) {
+func schedule(ctx context.Context, cleanerScope *scope.CleanerScope, jitterWindowInSeconds int,
+	logger logr.Logger) (*time.Time, error) {
+
 	newLastRunTime := cleanerScope.Cleaner.Status.LastRunTime
 
 	now := time.Now()
@@ -219,7 +234,7 @@ func schedule(ctx context.Context, cleanerScope *scope.CleanerScope, logger logr
 		logger.Info("set NextScheduleTime")
 		newNextScheduleTime = &metav1.Time{Time: *nextRun}
 	} else {
-		if shouldSchedule(cleanerScope.Cleaner, logger) {
+		if shouldSchedule(cleanerScope.Cleaner, jitterWindowInSeconds, logger) {
 			logger.Info("queuing job")
 			executorClient := executor.GetClient()
 			executorClient.Process(ctx, cleanerScope.Cleaner.Name)
@@ -246,7 +261,7 @@ func getNextScheduleTime(cleaner *appsv1alpha1.Cleaner, now time.Time) (*time.Ti
 	if cleaner.Status.LastRunTime != nil {
 		earliestTime = cleaner.Status.LastRunTime.Time
 	} else {
-		// If none found, then this is a recently created snapshot
+		// If none found, then this is a recently created cleaner
 		earliestTime = cleaner.CreationTimestamp.Time
 	}
 	if cleaner.Spec.StartingDeadlineSeconds != nil {
@@ -273,8 +288,9 @@ func getNextScheduleTime(cleaner *appsv1alpha1.Cleaner, now time.Time) (*time.Ti
 	return &next, nil
 }
 
-func shouldSchedule(cleaner *appsv1alpha1.Cleaner, logger logr.Logger) bool {
-	now := time.Now()
+func shouldSchedule(cleaner *appsv1alpha1.Cleaner, jitterWindowInSeconds int, logger logr.Logger) bool {
+	// if reconciliation is happening within jitterWindowInSeconds from scheduled time still process it
+	now := time.Now().Add(time.Duration(jitterWindowInSeconds) * time.Second)
 	logger.Info(fmt.Sprintf("currently next schedule is %s", cleaner.Status.NextScheduleTime.Time))
 
 	if now.Before(cleaner.Status.NextScheduleTime.Time) {
@@ -299,4 +315,11 @@ func shouldSchedule(cleaner *appsv1alpha1.Cleaner, logger logr.Logger) bool {
 func removeQueuedJobs(cleanerScope *scope.CleanerScope) {
 	executorClient := executor.GetClient()
 	executorClient.RemoveEntries(cleanerScope.Cleaner.Name)
+}
+
+func (r *CleanerReconciler) removeOldFinalizer(cleanerScope *scope.CleanerScope) {
+	oldFinalizer := "cleanerfinalizer.projectsveltos.io"
+	if controllerutil.ContainsFinalizer(cleanerScope.Cleaner, oldFinalizer) {
+		controllerutil.RemoveFinalizer(cleanerScope.Cleaner, oldFinalizer)
+	}
 }

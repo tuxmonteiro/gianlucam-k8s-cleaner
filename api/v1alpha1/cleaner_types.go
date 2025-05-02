@@ -20,7 +20,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	libsveltosv1alpha1 "github.com/projectsveltos/libsveltos/api/v1alpha1"
+	libsveltosv1beta1 "github.com/projectsveltos/libsveltos/api/v1beta1"
 )
 
 // Action specifies the action to take on matching resources
@@ -41,8 +41,30 @@ const (
 const (
 	// CleanerFinalizer allows Reconciler to clean up resources associated with
 	// Cleaner instance before removing it from the apiserver.
-	CleanerFinalizer = "cleanerfinalizer.projectsveltos.io"
+	CleanerFinalizer = "projectsveltos.io/cleaner-finalizer"
 )
+
+// DeleteOptions contains options for delete requests. It's generally a subset
+// of metav1.DeleteOptions.
+type DeleteOptions struct {
+	// GracePeriodSeconds is the duration in seconds before the object should be
+	// deleted. Value must be non-negative integer. The value zero indicates
+	// delete immediately. If this value is nil, the default grace period for the
+	// specified type will be used.
+	// +optional
+	GracePeriodSeconds *int64 `json:"gracePeriodSeconds,omitempty"`
+
+	// PropagationPolicy determined whether and how garbage collection will be
+	// performed. Either this field or OrphanDependents may be set, but not both.
+	// The default policy is decided by the existing finalizer set in the
+	// metadata.finalizers and the resource-specific default policy.
+	// Acceptable values are: 'Orphan' - orphan the dependents; 'Background' -
+	// allow the garbage collector to delete the dependents in the background;
+	// 'Foreground' - a cascading policy that deletes all dependents in the
+	// foreground.
+	// +optional
+	PropagationPolicy *metav1.DeletionPropagation `json:"propagationPolicy,omitempty"`
+}
 
 type ResourceSelector struct {
 	// Namespace of the resource deployed in the  Cluster.
@@ -65,7 +87,7 @@ type ResourceSelector struct {
 	Kind string `json:"kind"`
 
 	// LabelFilters allows to filter resources based on current labels.
-	LabelFilters []libsveltosv1alpha1.LabelFilter `json:"labelFilters,omitempty"`
+	LabelFilters []libsveltosv1beta1.LabelFilter `json:"labelFilters,omitempty"`
 
 	// Evaluate contains a function "evaluate" in lua language.
 	// The function will be passed one of the object selected based on
@@ -74,6 +96,11 @@ type ResourceSelector struct {
 	// object is a match and an optional "message" field.
 	// +optional
 	Evaluate string `json:"evaluate,omitempty"`
+
+	// ExcludeDeleted if set (default value), exclude resources marked as
+	// deleted. If set to false, k8s-cleaner will consider also resources marked as deleted.
+	// +kubebuilder:default:=true
+	ExcludeDeleted bool `json:"excludeDeleted,omitempty"`
 }
 
 type ResourcePolicySet struct {
@@ -94,7 +121,7 @@ type ResourcePolicySet struct {
 }
 
 // NotificationType specifies different type of notifications
-// +kubebuilder:validation:Enum:=CleanerReport;Slack;Webex;Discord;Teams
+// +kubebuilder:validation:Enum:=CleanerReport;Slack;Webex;Discord;Teams;SMTP;Telegram
 type NotificationType string
 
 const (
@@ -112,6 +139,12 @@ const (
 
 	// NotificationTypeTeams refers to generating a Teams message
 	NotificationTypeTeams = NotificationType("Teams")
+
+	// NotificationTypeSMTP refers to sending an email
+	NotificationTypeSMTP = NotificationType("SMTP")
+
+	// NotificationTypeTelegram refers to sending a Telegram message
+	NotificationTypeTelegram = NotificationType("Telegram")
 )
 
 type Notification struct {
@@ -139,6 +172,11 @@ type CleanerSpec struct {
 	// +kubebuilder:default:=Delete
 	Action Action `json:"action,omitempty"`
 
+	// DeleteOption is some configuration that modifies options for a delete request.
+	// This will be used only when action is delete
+	// +optional
+	DeleteOptions *DeleteOptions `json:"deleteOptions,omitempty"`
+
 	// Transform contains a function "transform" in lua language.
 	// When Action is set to *Transform*, this function will be invoked
 	// and be passed one of the object selected based on
@@ -158,8 +196,10 @@ type CleanerSpec struct {
 	// Notification is a list of source of events to evaluate.
 	// +patchMergeKey=name
 	// +patchStrategy=merge,retainKeys
+	// +listType=map
+	// +listMapKey=name
 	// +optional
-	Notifications []Notification `json:"notifications,omitempty"`
+	Notifications []Notification `json:"notifications,omitempty" patchStrategy:"merge" patchMergeKey:"name"`
 
 	// StoreResources will store full resources in this directory.
 	// Must be a volume where Cleaner can dump all matching resources.
